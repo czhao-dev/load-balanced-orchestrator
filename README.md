@@ -1,658 +1,217 @@
 # Go Reverse Proxy / Load Balancer
 
-A lightweight reverse proxy and HTTP load balancer written in Go. This project implements request forwarding, backend health checks, multiple load-balancing strategies, retry/failover behavior, structured logging, metrics, and graceful shutdown.
+[![Go Version](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
+[![YAML Config](https://img.shields.io/badge/Config-YAML-CB171E?logo=yaml&logoColor=white)](config.yaml)
+[![Prometheus Metrics](https://img.shields.io/badge/Metrics-Prometheus%20format-E6522C?logo=prometheus&logoColor=white)](#observability)
 
-The goal is to demonstrate backend infrastructure concepts commonly used in API gateways, service meshes, edge proxies, and internal traffic routers.
+A reverse proxy and HTTP load balancer written from scratch in Go, with no third-party HTTP or proxy frameworks. It forwards client requests to a pool of backend servers, actively monitors backend health, fails over around broken backends, and exposes Prometheus-style metrics — the same core mechanics found in API gateways and edge proxies like NGINX, HAProxy, and Envoy, implemented in a small, readable codebase.
 
-## Overview
+## Why this exists
 
-`go-load-balancer` is a from-scratch reverse proxy that accepts incoming HTTP requests and forwards them to a pool of backend servers.
-
-It supports:
-
-* reverse proxy request forwarding
-* multiple backend servers
-* round-robin load balancing
-* least-connections load balancing
-* weighted round-robin, optional
-* active health checks
-* passive failure detection
-* retry and failover
-* per-backend connection tracking
-* request timeout handling
-* structured access logs
-* Prometheus-style metrics
-* hot-reloadable configuration, optional
-* graceful shutdown
-
-This project is intended as a backend systems project for understanding how production load balancers route traffic, detect unhealthy backends, and maintain high availability.
-
-## Motivation
-
-Reverse proxies and load balancers are core infrastructure components in distributed systems. They sit between clients and backend services and are responsible for routing, availability, observability, and failure handling.
-
-This project explores important backend engineering concepts:
-
-* HTTP request forwarding
-* service discovery and backend pools
-* health checking
-* load-balancing algorithms
-* retry and timeout policies
-* connection management
-* graceful shutdown
-* observability and metrics
-* configuration-driven infrastructure
-
-The goal is not to replace mature systems such as NGINX, HAProxy, Envoy, or Traefik. Instead, this project implements the core ideas in a small, readable Go codebase.
+Reverse proxies sit on the critical path of nearly every distributed system: they decide which backend serves a request, how failures are detected and routed around, and what operators can observe about traffic in flight. This project builds those mechanics from first principles — manual request forwarding, pluggable load-balancing strategies, a health-check state machine, retry/failover logic, and a metrics registry — instead of wrapping an existing proxy library, in order to demonstrate the engineering underneath that category of infrastructure.
 
 ## Features
 
-### Reverse Proxy
-
-* [x] Forward HTTP requests to backend servers
-* [x] Preserve request path and query parameters
-* [x] Forward selected headers
-* [x] Add proxy headers such as `X-Forwarded-For`
-* [x] Stream response bodies back to clients
-* [x] Handle backend errors with proper HTTP responses
-
-### Load Balancing
-
-* [x] Round-robin selection
-* [x] Least-connections selection
-* [ ] Weighted round-robin
-* [ ] Random selection
-* [ ] Consistent hashing, optional
-
-### Health Checking
-
-* [x] Active health checks
-* [x] Mark unhealthy backends as unavailable
-* [x] Restore recovered backends automatically
-* [x] Configurable health-check interval
-* [x] Configurable health-check path
-* [ ] Passive health checks based on request failures
-
-### Reliability
-
-* [x] Backend retry and failover
-* [x] Request timeout handling
-* [x] Graceful shutdown
-* [x] Connection tracking
-* [ ] Circuit breaker, optional
-* [ ] Rate limiting, optional
-
-### Observability
-
-* [x] Structured access logs
-* [x] Backend health status logs
-* [x] Request latency tracking
-* [x] Per-backend request counters
-* [x] Metrics endpoint
-* [ ] Prometheus integration
-* [ ] Tracing, optional
-
-### Developer Experience
-
-* [x] YAML-based configuration
-* [x] Docker Compose demo environment
-* [x] Unit tests
-* [x] Integration tests
-* [x] Benchmark tests
-* [x] Example backend services
-
-Update this section as implementation progresses.
+* **Reverse proxy forwarding** — rewrites and streams requests to backends, preserving path, query parameters, and headers; injects `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`.
+* **Load-balancing strategies** — round robin, least connections, and weighted round robin, selected via config.
+* **Active health checking** — concurrent per-backend probes on a configurable interval/path, with independent healthy/unhealthy consecutive-count thresholds to avoid flapping.
+* **Retry and failover** — idempotent requests (`GET`/`HEAD`/`OPTIONS`) are retried against a different healthy backend on connection failure or timeout, up to a configurable limit; non-idempotent methods are never silently retried.
+* **Per-backend connection tracking** — atomic in-flight request counters feed both the least-connections strategy and the metrics endpoint.
+* **Graceful shutdown** — stops accepting new connections on `SIGINT`/`SIGTERM` while letting in-flight requests finish, bounded by a configurable timeout.
+* **Structured logging** — JSON or text logs via `log/slog`, including backend health transitions and forwarding failures.
+* **Observability endpoints** — `/healthz`, `/admin/backends` (live per-backend JSON status), and `/metrics` (Prometheus text exposition format, hand-rolled with no client library dependency).
+* **YAML-driven configuration** — server timeouts, load-balancer strategy, health-check thresholds, and the backend pool are all declared in `config.yaml`.
 
 ## Architecture
 
-```text id="6zfyqm"
-                  +------------------+
-                  |     Client       |
-                  +--------+---------+
-                           |
-                           v
-                  +------------------+
-                  | Reverse Proxy    |
-                  | Load Balancer    |
-                  +--------+---------+
-                           |
-              +------------+------------+
-              |                         |
-              v                         v
-     +------------------+      +------------------+
-     | Backend Server 1 |      | Backend Server 2 |
-     +------------------+      +------------------+
-              |
-              v
-     +------------------+
-     | Backend Server N |
-     +------------------+
+### Request lifecycle
+
+```
+Client
+  │
+  ▼
+http.Server  (cmd/proxy)
+  │  ServeHTTP
+  ▼
+proxy.Handler                     internal/proxy
+  │  1. balancer.Next(pool) ─────▶ internal/balancer (round robin / least conn / weighted)
+  │                                       │ reads pool.Healthy()
+  │  2. build outbound request            ▼
+  │     (director.go: rewrite URL,   internal/backend (Pool, Backend atomics)
+  │      inject X-Forwarded-*)            ▲
+  │  3. client.Do via shared             │ IsAlive() / ActiveConnections()
+  │     keep-alive Transport              │
+  │  4. on failure + idempotent      internal/health.Checker
+  │     method → retry next backend       │ probes /health on interval,
+  │  5. stream response, or                │ flips Backend.alive after
+  │     502/503/504 if exhausted           │ N consecutive failures/successes
+  ▼                                        │
+Client response               internal/metrics.Metrics ◀── counters updated
+                                            │              on every request/check
+                               /metrics, /admin/backends, /healthz
 ```
 
-Internal components:
+### Design decisions
 
-```text id="0v07pk"
-+---------------------+
-| HTTP Server         |
-|---------------------|
-| accepts requests    |
-| handles shutdown    |
-+----------+----------+
-           |
-           v
-+---------------------+
-| Proxy Handler       |
-|---------------------|
-| rewrites request    |
-| forwards request    |
-| streams response    |
-+----------+----------+
-           |
-           v
-+---------------------+
-| Load Balancer       |
-|---------------------|
-| selects backend     |
-| tracks connections  |
-| applies strategy    |
-+----------+----------+
-           |
-           v
-+---------------------+
-| Backend Pool        |
-|---------------------|
-| backend state       |
-| health status       |
-| failure counters    |
-+----------+----------+
-           |
-           v
-+---------------------+
-| Health Checker      |
-|---------------------|
-| probes backends     |
-| updates status      |
-+---------------------+
+**Manual forwarding instead of `httputil.ReverseProxy`.** The standard library's `ReverseProxy` forwards to a single fixed target per request; retrying against a *different* backend after a failed attempt needs control over exactly when response headers get committed to the client. `Handler.proxyOnce` (`internal/proxy/handler.go`) only writes the upstream's status line and headers to the client after a response has been successfully received — a dial failure, connection refusal, or timeout happens before anything is written to the client, so the same request can be retried against another backend transparently. This is also why redirects are never followed automatically (`CheckRedirect` returns `http.ErrUseLastResponse`): a reverse proxy must hand a 3xx straight to the client, not chase it on the client's behalf.
+
+**Retry safety is method-aware.** Only `GET`, `HEAD`, and `OPTIONS` are retried automatically. Retrying a `POST` against a second backend after an ambiguous failure (e.g. the first backend processed the request but the response was lost) could duplicate a side effect, so non-idempotent methods get exactly one attempt and surface the failure to the client instead.
+
+**Lock-free hot path.** `Backend` (`internal/backend/backend.go`) stores liveness, active-connection count, and request/error counters as `atomic.Bool`/`atomic.Int64` fields rather than behind a mutex, since these are read and written on every single proxied request. `Pool` itself is an immutable slice built once at startup — health checks and the balancer only ever mutate the atomic fields *inside* each `Backend`, so no locking is needed to read a consistent backend list under concurrent load.
+
+**Health is a hysteresis state machine, not a single probe.** `health.Checker` (`internal/health/checker.go`) tracks a signed consecutive-count per backend: positive runs of successes, negative runs of failures. A backend only flips from alive to dead after `unhealthy_threshold` consecutive failed probes, and only recovers after `healthy_threshold` consecutive successful ones. This absorbs single transient blips (a dropped packet, a slow GC pause) without removing a backend from rotation, while still reacting decisively to a real outage.
+
+**Metrics push, not pull, on every state change.** Rather than having the `/metrics` handler reach into the balancer and health checker at scrape time, each component (the proxy handler, the health checker) pushes counter/gauge updates into a shared `metrics.Metrics` registry as events happen. `Render()` then just formats whatever is currently in the registry. This keeps the metrics package fully decoupled from balancing and health-check logic — it has no imports from either.
+
+**Why round robin / least connections / weighted round robin specifically.** Round robin is the right default when backends are roughly homogeneous and request cost is uniform. Least connections corrects for the common case where request latency varies — it routes around a backend that's currently slow rather than blindly continuing to send it 1-in-N requests. Weighted round robin exists for heterogeneous backend capacity (e.g. a bigger instance that should take proportionally more traffic) and is implemented as a deterministic cumulative-weight walk rather than a "current weight" decay algorithm, trading a small bias under concurrent access for a simpler, easily-tested implementation.
+
+### Package layout
+
+```
+cmd/
+  proxy/        entrypoint: loads config, wires balancer + health checker + handler, serves, handles shutdown
+  backend/      minimal demo upstream used for local testing and the Docker Compose demo
+internal/
+  config/       YAML parsing, defaults, validation (config.go, duration.go)
+  backend/      Backend (atomic health/connection/request state) and Pool
+  balancer/     Balancer interface + round robin, least connections, weighted round robin
+  health/       active health checker with consecutive-threshold hysteresis
+  proxy/        HTTP handler: backend selection, retry/failover, header rewriting, response streaming
+  metrics/      Prometheus-format counter/gauge registry, no external dependency
+  logging/      structured slog.Logger construction (JSON/text, level)
+  admin/        /admin/backends JSON status handler
+tests/integration/ end-to-end tests against real httptest backends (no mocks)
 ```
 
 ## Load-Balancing Strategies
 
-### Round Robin
+* **Round robin** (`internal/balancer/round_robin.go`) — an atomic counter cycles through the currently-healthy backend list. Simple, and fair when backends are equivalent.
+* **Least connections** (`least_conn.go`) — scans healthy backends and picks the one with the fewest in-flight requests, tracked via the per-backend atomic connection counter. Better than round robin when request cost is uneven.
+* **Weighted round robin** (`weighted.go`) — walks a cumulative-weight ring sized to the sum of healthy backend weights, so a backend with weight 3 receives ~3x the traffic of a backend with weight 1.
 
-Round robin distributes requests evenly across healthy backends.
-
-```text id="md9gjb"
-request 1 -> backend 1
-request 2 -> backend 2
-request 3 -> backend 3
-request 4 -> backend 1
-```
-
-This strategy is simple and works well when all backends have similar capacity.
-
-### Least Connections
-
-Least-connections routing sends the next request to the healthy backend with the fewest active requests.
-
-This strategy is useful when requests have variable latency or when some backends are temporarily busier than others.
-
-### Weighted Round Robin
-
-Weighted round robin allows stronger backends to receive more traffic.
-
-Example:
-
-```text id="151pmo"
-backend-a weight 3
-backend-b weight 1
-
-backend-a receives about 75% of requests
-backend-b receives about 25% of requests
-```
-
-### Consistent Hashing, Optional
-
-Consistent hashing can route requests with the same key to the same backend.
-
-Possible hash keys:
-
-* client IP
-* request path
-* user ID header
-* session ID cookie
-
-This is useful for cache locality and session affinity.
+All three strategies only ever consider `pool.Healthy()`, so an unhealthy backend is structurally excluded from selection, not just deprioritized.
 
 ## Health Checks
 
-The proxy periodically checks each backend using a configurable health endpoint.
-
-Example:
-
-```text id="yod5b8"
-GET /health
-```
-
-A backend is considered healthy if it responds with a success status before the configured timeout.
-
-Health-check behavior:
-
-```text id="519zid"
-healthy backend   -> eligible for traffic
-unhealthy backend -> skipped by load balancer
-recovered backend -> automatically re-added
-```
-
-Example log:
-
-```text id="qf7i3u"
-backend=http://localhost:9001 status=healthy latency=3ms
-backend=http://localhost:9002 status=unhealthy error="connection refused"
-```
+Each backend is probed concurrently on `health_check.interval` against `health_check.path`. A probe counts as a success only on a 2xx response within `health_check.timeout`; anything else — non-2xx status, timeout, or connection error — counts as a failure. The checker tracks consecutive successes/failures per backend and only flips `Backend.alive` once `healthy_threshold` or `unhealthy_threshold` consecutive results are observed, which is what prevents a single slow response from yanking a backend out of rotation. Every transition is logged, and the live status of each backend is always available at `/admin/backends` and as the `proxy_backend_health_status` metric.
 
 ## Retry and Failover
 
-If a selected backend fails, the proxy can retry the request against another healthy backend.
-
-Example behavior:
-
-```text id="jz91el"
-client request
-  -> backend-1 fails
-  -> retry backend-2
-  -> response returned to client
-```
-
-Retries should be limited to avoid amplifying traffic during outages.
-
-Recommended policy:
-
-```text id="56mpc7"
-max_retries: 2
-per_request_timeout: 2s
-backend_timeout: 1s
-```
-
-For safety, retry behavior should be conservative for non-idempotent methods such as `POST`, `PUT`, and `PATCH`.
+When a request fails against the selected backend with a transport-level error (connection refused, timeout) — as opposed to the backend returning a valid HTTP response, even an error one — the proxy retries against a different backend selected fresh from the current healthy pool, up to `load_balancer.max_retries` additional attempts. Retries are only performed for idempotent methods. If every attempt is exhausted, the client receives `502 Bad Gateway` (forwarding/connection failure), `504 Gateway Timeout` (backend exceeded `backend_timeout`), or `503 Service Unavailable` (no healthy backend was available to try in the first place).
 
 ## Configuration
 
-Example `config.yaml`:
+The proxy is configured entirely through a YAML file (`config.yaml` by default, override with `-config`):
 
-```yaml id="mtzbyu"
-server:
-  listen_addr: ":8080"
-  read_timeout: "5s"
-  write_timeout: "10s"
-  shutdown_timeout: "5s"
-
-load_balancer:
-  strategy: "round_robin"
-  max_retries: 2
-
-health_check:
-  enabled: true
-  path: "/health"
-  interval: "2s"
-  timeout: "500ms"
-  unhealthy_threshold: 2
-  healthy_threshold: 2
-
-backends:
-  - name: "backend-1"
-    url: "http://localhost:9001"
-    weight: 1
-
-  - name: "backend-2"
-    url: "http://localhost:9002"
-    weight: 1
-
-  - name: "backend-3"
-    url: "http://localhost:9003"
-    weight: 1
-
-logging:
-  level: "info"
-  format: "json"
-
-metrics:
-  enabled: true
-  path: "/metrics"
-```
+| Section | Key | Purpose |
+|---|---|---|
+| `server` | `listen_addr`, `read_timeout`, `write_timeout`, `shutdown_timeout` | HTTP server tuning and graceful-shutdown deadline |
+| `load_balancer` | `strategy`, `max_retries`, `backend_timeout` | `round_robin` \| `least_conn` \| `weighted_round_robin`, retry budget, per-attempt timeout |
+| `health_check` | `enabled`, `path`, `interval`, `timeout`, `unhealthy_threshold`, `healthy_threshold` | active probe behavior |
+| `backends` | `name`, `url`, `weight` | the backend pool |
+| `logging` | `level`, `format` | `slog` level and `json`/`text` output |
+| `metrics` | `enabled`, `path` | toggles and locates the Prometheus-format endpoint |
 
 ## API Endpoints
 
-| Endpoint          | Description                       |
-| ----------------- | --------------------------------- |
-| `/`               | Proxied request path              |
-| `/healthz`        | Health check for the proxy itself |
-| `/metrics`        | Runtime and request metrics       |
-| `/admin/backends` | Backend status, optional          |
-| `/admin/reload`   | Reload configuration, optional    |
+| Endpoint | Description |
+|---|---|
+| `/*` | Proxied traffic — forwarded to the backend pool per the configured strategy |
+| `/healthz` | Liveness check for the proxy process itself |
+| `/admin/backends` | JSON status (health, weight, active connections, request/error counts) for every backend |
+| `/metrics` | Prometheus text-exposition metrics |
 
-## Metrics
+## Observability
 
-The proxy exposes metrics for observability.
+`/metrics` exposes, per backend where applicable:
 
-Example metrics:
+* `proxy_up`, `proxy_requests_total`, `proxy_retries_total`, `proxy_request_duration_seconds_{count,sum}`
+* `proxy_backend_requests_total{backend=...}`, `proxy_backend_errors_total{backend=...}`
+* `proxy_backend_active_connections{backend=...}`, `proxy_backend_health_status{backend=...}`
 
-```text id="zk1u18"
-proxy_requests_total
-proxy_request_duration_seconds
-proxy_backend_requests_total
-proxy_backend_errors_total
-proxy_backend_active_connections
-proxy_backend_health_status
-proxy_retries_total
-proxy_up
-```
+These are emitted in standard Prometheus text format and require no `prometheus/client_golang` dependency — `internal/metrics` formats them directly.
 
-Example `/metrics` output:
+## Running Locally
 
-```text id="2gy6s1"
-proxy_requests_total 1024
-proxy_backend_requests_total{backend="backend-1"} 341
-proxy_backend_requests_total{backend="backend-2"} 342
-proxy_backend_requests_total{backend="backend-3"} 341
-proxy_backend_errors_total{backend="backend-2"} 3
-proxy_backend_active_connections{backend="backend-1"} 7
-proxy_backend_health_status{backend="backend-1"} 1
-```
-
-## Project Structure
-
-Suggested layout:
-
-```text id="v29n3y"
-go-load-balancer/
-├── README.md
-├── go.mod
-├── go.sum
-├── Dockerfile
-├── docker-compose.yml
-├── config.yaml
-├── cmd/
-│   ├── proxy/
-│   │   └── main.go
-│   └── backend/
-│       └── main.go
-├── internal/
-│   ├── config/
-│   │   └── config.go
-│   ├── proxy/
-│   │   ├── handler.go
-│   │   ├── director.go
-│   │   └── transport.go
-│   ├── balancer/
-│   │   ├── balancer.go
-│   │   ├── round_robin.go
-│   │   ├── least_conn.go
-│   │   └── weighted.go
-│   ├── backend/
-│   │   ├── backend.go
-│   │   └── pool.go
-│   ├── health/
-│   │   └── checker.go
-│   ├── metrics/
-│   │   └── metrics.go
-│   ├── logging/
-│   │   └── logger.go
-│   └── admin/
-│       └── handler.go
-├── tests/
-│   ├── integration/
-│   └── load/
-└── scripts/
-    ├── run-demo.sh
-    └── load-test.sh
-```
-
-## Quick Start
-
-Clone the repository:
-
-```bash id="d3xbrg"
-git clone https://github.com/czhao-dev/go-load-balancer.git
-cd go-load-balancer
-```
-
-Run tests:
-
-```bash id="hcj7gx"
+```bash
+git clone https://github.com/czhao-dev/reverse-proxy-load-balancer.git
+cd reverse-proxy-load-balancer
 go test ./...
+./scripts/run-demo.sh   # builds and runs 3 demo backends + the proxy on :8080
 ```
 
-Run the demo with Docker Compose:
+Or via Docker Compose, which builds the same binaries into a container image and wires three backends behind the proxy on a private network:
 
-```bash id="695ttj"
+```bash
 docker compose up --build
 ```
 
-This starts:
+## Benchmark Results
 
-```text id="6bx3bt"
-proxy      -> localhost:8080
-backend-1  -> localhost:9001
-backend-2  -> localhost:9002
-backend-3  -> localhost:9003
+Measured locally on an Apple M3 (`go test -bench`, in-process, isolating proxy overhead from network cost) and with `ab` against the running proxy + 3 demo backends over loopback (round-robin strategy, health checks enabled):
+
+**`go test -bench=. ./internal/proxy/...`**
+
+| | ns/op |
+|---|---|
+| Single-core | 27,302 ns/op |
+| 4 cores (parallel) | 11,644 ns/op |
+
+**`ab -n 20000 -c 100 http://localhost:8080/api/hello`**
+
+| Metric | Result |
+|---|---|
+| Requests/sec | 16,488 |
+| Failed requests | 0 |
+| Median latency | 6 ms |
+| p95 latency | 8 ms |
+| p99 latency | 12 ms |
+
+**`ab -n 50000 -c 200 http://localhost:8080/api/hello`**
+
+| Metric | Result |
+|---|---|
+| Requests/sec | 13,316 |
+| Failed requests | 0 |
+| Median latency | 13 ms |
+| p99 latency | 35 ms |
+
+End-to-end behavior verified manually alongside the benchmarks: traffic round-robins evenly across all backends; killing a backend process removes it from rotation within one `unhealthy_threshold` window and traffic continues uninterrupted against the remaining backends; restarting it restores it to rotation automatically; and `SIGTERM` drains in-flight requests before the process exits.
+
+## Testing
+
+* **Unit tests** (`internal/.../*_test.go`) cover backend selection for all three strategies, health-state transitions under consecutive thresholds, config parsing/defaults/validation, and metrics rendering.
+* **Integration tests** (`tests/integration/`) run the real `proxy.Handler` and `health.Checker` against `httptest` backends — no mocks — and verify traffic distribution, automatic backend removal/recovery, and graceful shutdown end-to-end.
+* **Benchmarks** (`internal/proxy/benchmark_test.go`) measure proxy handler overhead in isolation.
+
+Current coverage: `backend` 83%, `balancer` 71%, `config` 90%, `health` 88%, `metrics` 100%, `proxy` 89%.
+
+```bash
+go test ./... -race -cover
 ```
-
-Send requests:
-
-```bash id="9tl3y6"
-curl http://localhost:8080/api/hello
-curl http://localhost:8080/api/hello
-curl http://localhost:8080/api/hello
-```
-
-Check backend status:
-
-```bash id="ey13p8"
-curl http://localhost:8080/admin/backends
-```
-
-Check metrics:
-
-```bash id="vjzf6n"
-curl http://localhost:8080/metrics
-```
-
-## Example Backend Server
-
-The repository includes a small demo backend server.
-
-Example response:
-
-```json id="b40hqn"
-{
-  "backend": "backend-1",
-  "path": "/api/hello",
-  "message": "hello from backend-1"
-}
-```
-
-When round-robin balancing is enabled, repeated requests should rotate through available backends.
-
-## Load Testing
-
-Use `hey`, `wrk`, or `ab` to test the proxy.
-
-Example using `hey`:
-
-```bash id="elrhik"
-hey -n 10000 -c 100 http://localhost:8080/api/hello
-```
-
-Example output to include in the README after testing:
-
-```text id="m9uxjj"
-Total requests:        10000
-Concurrency:           100
-Average latency:       8.4 ms
-p95 latency:           18.7 ms
-p99 latency:           31.2 ms
-Requests/sec:          11800
-```
-
-## Testing Strategy
-
-### Unit Tests
-
-Unit tests should cover:
-
-* round-robin backend selection
-* least-connections backend selection
-* weighted backend selection
-* unhealthy backends are skipped
-* retry limit is respected
-* request headers are forwarded correctly
-* backend connection counters are updated correctly
-* configuration parsing
-
-### Integration Tests
-
-Integration tests should cover:
-
-* proxy forwards requests to healthy backends
-* traffic is distributed across multiple backends
-* failed backend is removed from rotation
-* recovered backend is added back into rotation
-* request timeout returns proper error
-* graceful shutdown stops accepting new requests
-* metrics endpoint exposes expected counters
-
-### Load Tests
-
-Load tests should measure:
-
-* throughput
-* average latency
-* p95/p99 latency
-* retry behavior under backend failure
-* health-check recovery time
-* behavior under uneven backend latency
-
-## Design Notes
-
-### Why Go?
-
-Go is a strong fit for this project because it provides:
-
-* efficient HTTP server and client libraries
-* lightweight goroutines
-* simple concurrency primitives
-* good networking support
-* straightforward deployment
-* strong testing and benchmarking tools
-
-### Why active health checks?
-
-Active health checks let the proxy proactively remove bad backends before routing real client traffic to them.
-
-### Why least-connections?
-
-Round robin works well when requests are uniform. Least-connections is better when requests have different processing times because it avoids overloading already busy backends.
-
-### Why graceful shutdown?
-
-A production proxy should stop accepting new requests while allowing in-flight requests to complete before exiting.
 
 ## Failure Handling
 
-The proxy handles several failure cases:
-
-| Failure                    | Behavior                               |
-| -------------------------- | -------------------------------------- |
-| Backend connection refused | Retry another healthy backend          |
-| Backend timeout            | Return `504 Gateway Timeout` or retry  |
-| No healthy backends        | Return `503 Service Unavailable`       |
-| Invalid backend response   | Return `502 Bad Gateway`               |
-| Proxy shutting down        | Stop accepting new requests            |
-| Health check failure       | Mark backend unhealthy after threshold |
+| Failure | Behavior |
+|---|---|
+| Backend connection refused | Retry a different healthy backend (idempotent methods only) |
+| Backend exceeds `backend_timeout` | `504 Gateway Timeout`, retried if idempotent |
+| No healthy backend available | `503 Service Unavailable` |
+| All retries exhausted | `502 Bad Gateway` |
+| Health probe fails `unhealthy_threshold` times | Backend marked unhealthy, excluded from selection |
+| Health probe succeeds `healthy_threshold` times | Backend restored to rotation |
+| `SIGINT`/`SIGTERM` received | Stop accepting new connections, drain in-flight requests, exit |
 
 ## Security Considerations
 
-This project is primarily focused on reverse proxy and load-balancing mechanics. For production-style hardening, consider adding:
-
-* TLS termination
-* request size limits
-* rate limiting
-* IP allow/deny lists
-* header sanitization
-* authentication for admin endpoints
-* protection against slowloris-style clients
-* access log redaction
-* secure default timeouts
-
-## Roadmap
-
-### Phase 1: Basic Reverse Proxy
-
-* [ ] Parse backend config
-* [ ] Forward requests to backend
-* [ ] Preserve path and query parameters
-* [ ] Return backend response to client
-
-### Phase 2: Load Balancing
-
-* [ ] Implement round robin
-* [ ] Implement least connections
-* [ ] Add backend connection counters
-* [ ] Skip unhealthy backends
-
-### Phase 3: Health Checks and Failover
-
-* [ ] Add active health checks
-* [ ] Mark backends healthy/unhealthy
-* [ ] Add retry policy
-* [ ] Return 503 when no healthy backend exists
-
-### Phase 4: Observability
-
-* [ ] Add structured logs
-* [ ] Add metrics endpoint
-* [ ] Track latency and status codes
-* [ ] Add backend-level metrics
-
-### Phase 5: Production-Style Features
-
-* [ ] Graceful shutdown
-* [ ] Hot configuration reload
-* [ ] Weighted round robin
-* [ ] Circuit breaker
-* [ ] Rate limiting
-* [ ] TLS support
-* [ ] Admin API
-
-## What This Project Demonstrates
-
-This project demonstrates backend infrastructure skills:
-
-* HTTP reverse proxy design
-* load-balancing algorithms
-* health-check design
-* retry and failover behavior
-* Go concurrency
-* backend pool management
-* timeout handling
-* structured logging
-* metrics and observability
-* Docker-based integration testing
-* distributed-systems failure handling
+This project focuses on proxy and load-balancing mechanics, not production hardening. Deploying it beyond a demo would additionally need: TLS termination, request size limits, rate limiting, IP allow/deny lists, header sanitization, authentication on `/admin/*`, and slowloris-style abuse protection.
 
 ## Non-Goals
 
-This project is not intended to replace production-grade systems such as NGINX, HAProxy, Envoy, or Traefik.
-
-Non-goals:
-
-* full HTTP/2 or HTTP/3 proxy support
-* full service mesh functionality
-* advanced TLS certificate management
-* production-grade security hardening
-* Kubernetes ingress controller support
-* dynamic service discovery in the first version
+This is not a replacement for NGINX, HAProxy, Envoy, or Traefik. It does not implement HTTP/2 or HTTP/3 proxying, service-mesh features, dynamic service discovery, or Kubernetes ingress integration — the goal is to make the core mechanics of a load balancer legible in a small Go codebase, not to compete with mature production systems.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).

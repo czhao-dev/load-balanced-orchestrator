@@ -1,0 +1,39 @@
+server:
+  listen_addr: ":8080"
+  read_timeout: "5s"
+  write_timeout: "10s"
+  shutdown_timeout: "5s"
+
+load_balancer:
+  strategy: "round_robin"
+  max_retries: 2
+  backend_timeout: "2s"
+
+health_check:
+  enabled: true
+  path: "/health"
+  interval: "2s"
+  timeout: "500ms"
+  unhealthy_threshold: 2
+  healthy_threshold: 2
+
+backends:
+  - name: "backend-1"
+    url: "http://backend-1:9001"
+    weight: 1
+
+  - name: "backend-2"
+    url: "http://backend-2:9002"
+    weight: 1
+
+  - name: "backend-3"
+    url: "http://backend-3:9003"
+    weight: 1
+
+logging:
+  level: "info"
+  format: "json"
+
+metrics:
+  enabled: true
+  path: "/metrics"

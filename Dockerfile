@@ -1,0 +1,12 @@
+FROM golang:1.23-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/proxy ./cmd/proxy
+RUN CGO_ENABLED=0 go build -o /out/backend ./cmd/backend
+
+FROM alpine:3.20
+COPY --from=build /out/proxy /usr/local/bin/proxy
+COPY --from=build /out/backend /usr/local/bin/backend
+ENTRYPOINT ["/usr/local/bin/proxy"]
