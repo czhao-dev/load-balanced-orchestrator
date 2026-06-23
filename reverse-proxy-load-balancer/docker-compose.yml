@@ -1,0 +1,33 @@
+services:
+  backend-1:
+    build: .
+    entrypoint: ["/usr/local/bin/backend"]
+    command: ["-name=backend-1", "-addr=:9001"]
+    expose:
+      - "9001"
+
+  backend-2:
+    build: .
+    entrypoint: ["/usr/local/bin/backend"]
+    command: ["-name=backend-2", "-addr=:9002"]
+    expose:
+      - "9002"
+
+  backend-3:
+    build: .
+    entrypoint: ["/usr/local/bin/backend"]
+    command: ["-name=backend-3", "-addr=:9003"]
+    expose:
+      - "9003"
+
+  proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.docker.yaml:/config.yaml:ro
+    command: ["-config=/config.yaml"]
+    depends_on:
+      - backend-1
+      - backend-2
+      - backend-3
