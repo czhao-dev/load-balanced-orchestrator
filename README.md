@@ -1,4 +1,4 @@
-# distributed-job-platform
+# Backend Infrastructure Platform
 
 A mini infrastructure control plane: it accepts declarative workload specs, schedules jobs onto registered worker nodes, tracks worker health via heartbeats, reconciles desired vs. actual state, recovers from worker failures, and drives a health-aware reverse proxy's routing — all with Prometheus/Grafana observability across the whole stack.
 
