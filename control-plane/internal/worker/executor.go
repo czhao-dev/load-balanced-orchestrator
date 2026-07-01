@@ -10,11 +10,20 @@ import (
 	"github.com/czhao-dev/control-plane/internal/model"
 )
 
-// runPod executes a pod as a subprocess and reports its outcome back to the
-// control plane.
+// runPod reports RUNNING, then dispatches to the container or subprocess path
+// based on whether the pod specifies an OCI image.
 func (a *Agent) runPod(ctx context.Context, pod model.Pod) {
 	a.reportStatus(pod.ID, model.PodRunning, nil, "", "")
+	if pod.Image != "" {
+		a.runContainerPod(ctx, pod)
+	} else {
+		a.runSubprocessPod(ctx, pod)
+	}
+}
 
+// runSubprocessPod executes a pod as an OS subprocess and reports its outcome
+// back to the control plane.
+func (a *Agent) runSubprocessPod(ctx context.Context, pod model.Pod) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 

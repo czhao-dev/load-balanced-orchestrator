@@ -33,9 +33,15 @@ func main() {
 		HeartbeatInterval: envDuration("WORKER_HEARTBEAT_INTERVAL", 5*time.Second),
 		PollInterval:      envDuration("WORKER_POLL_INTERVAL", 1*time.Second),
 		ShutdownTimeout:   envDuration("WORKER_SHUTDOWN_TIMEOUT", 10*time.Second),
+		DockerHost:        envString("WORKER_DOCKER_HOST", ""),
 	}
 
-	agent := worker.New(cfg, logger)
+	agent, err := worker.New(cfg, logger)
+	if err != nil {
+		logger.Error("failed to initialize worker agent", "error", err)
+		os.Exit(1)
+	}
+	defer agent.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

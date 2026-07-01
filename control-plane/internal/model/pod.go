@@ -51,8 +51,11 @@ type Pod struct {
 	Labels       map[string]string `json:"labels,omitempty"`
 	Attempt      int               `json:"attempt"`
 	Status       PodStatus         `json:"status"`
+	Image        string            `json:"image,omitempty"`
+	ContainerID  string            `json:"container_id,omitempty"`
 	Command      string            `json:"command"`
 	Args         []string          `json:"args"`
+	Resources    ResourceRequest   `json:"resources,omitempty"`
 	ExitCode     *int              `json:"exit_code,omitempty"`
 	Error        string            `json:"error,omitempty"`
 	Output       string            `json:"output,omitempty"`

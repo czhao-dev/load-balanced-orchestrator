@@ -75,7 +75,7 @@ func TestAgent_RegistersHeartbeatsAndExecutesPod(t *testing.T) {
 	srv := httptest.NewServer(fake.handler(pod))
 	defer srv.Close()
 
-	agent := New(Config{
+	agent, err := New(Config{
 		ControlPlaneURL:   srv.URL,
 		Hostname:          "test",
 		Address:           "http://test:9100",
@@ -84,6 +84,8 @@ func TestAgent_RegistersHeartbeatsAndExecutesPod(t *testing.T) {
 		PollInterval:      10 * time.Millisecond,
 		ShutdownTimeout:   2 * time.Second,
 	}, testLogger())
+	require.NoError(t, err)
+	defer agent.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -116,13 +118,15 @@ func TestAgent_GracefulShutdownDrainsInFlightPod(t *testing.T) {
 	srv := httptest.NewServer(fake.handler(pod))
 	defer srv.Close()
 
-	agent := New(Config{
+	agent, err := New(Config{
 		ControlPlaneURL:   srv.URL,
 		MaxConcurrentJobs: 1,
 		HeartbeatInterval: time.Hour,
 		PollInterval:      10 * time.Millisecond,
 		ShutdownTimeout:   2 * time.Second,
 	}, testLogger())
+	require.NoError(t, err)
+	defer agent.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

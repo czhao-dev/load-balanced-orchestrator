@@ -60,6 +60,7 @@ type Deployment struct {
 	Namespace     string            `json:"namespace"`
 	Labels        map[string]string `json:"labels,omitempty"`
 	Type          DeploymentType    `json:"type"`
+	Image         string            `json:"image,omitempty"`
 	Command       string            `json:"command"`
 	Args          []string          `json:"args"`
 	Replicas      int               `json:"replicas"`

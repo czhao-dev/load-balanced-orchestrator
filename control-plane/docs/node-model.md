@@ -13,16 +13,22 @@ start node agent
   -> heartbeat loop: POST /api/v1/nodes/{id}/heartbeat every 5s (WORKER_HEARTBEAT_INTERVAL)
   -> poll loop: GET /api/v1/nodes/{id}/pods/poll every 1s (WORKER_POLL_INTERVAL)
        -> on a pod: acquire a concurrency-semaphore slot, run it as a subprocess
-       -> report RUNNING, then SUCCEEDED/FAILED/CANCELLED, via POST .../status
+          or Docker container (if pod.Image is set), report RUNNING then
+          SUCCEEDED/FAILED/CANCELLED via POST .../status
   -> on SIGTERM: stop polling immediately, let in-flight pods finish
        (up to WORKER_SHUTDOWN_TIMEOUT, default 10s), then cancel stragglers
 ```
 
 Node identity is **not persisted** across restarts — a node agent that is killed and restarted registers fresh and gets a brand-new ID. The control plane never reconciles "this is actually the same physical node as before"; it is simply a new entry in the store, and the old ID stays `UNHEALTHY` forever (see the reconciler's known gap).
 
-## Subprocess execution
+## Pod execution
 
-`internal/worker/executor.go` runs each Pod as an OS subprocess via `exec.CommandContext`, captures stdout/stderr into a `bytes.Buffer`, and extracts the exit code via `*exec.ExitError`. Pods are not OCI containers — this project has no container runtime (see the documented simplifications in [architecture.md](architecture.md)).
+`internal/worker/executor.go` dispatches each pod to one of two execution paths based on whether the pod carries an `image` field:
+
+- **Subprocess** (`image` is empty): `exec.CommandContext` runs `pod.Command pod.Args...` as an OS subprocess. stdout/stderr are captured into a `bytes.Buffer`; the exit code is extracted via `*exec.ExitError`.
+- **Docker container** (`image` is set): `internal/worker/container.go` uses the official Docker Go SDK (`github.com/docker/docker/client`) to pull the image, create and start a container, wait for it to exit, collect its logs via `stdcopy.StdCopy`, and then remove the container. CPU and memory limits from the pod's `resources` field are mapped to Docker `HostConfig.NanoCPUs` and `HostConfig.Memory`. The worker agent's Docker daemon socket is configured via `WORKER_DOCKER_HOST` (default: `DOCKER_HOST` env var or Docker's default socket).
+
+In both paths the status sequence is identical: `RUNNING` on start, then `SUCCEEDED`, `FAILED`, or `CANCELLED` on finish.
 
 ## Graceful shutdown
 

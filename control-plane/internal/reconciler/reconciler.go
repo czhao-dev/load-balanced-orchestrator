@@ -104,8 +104,10 @@ func (rc *Reconciler) reconcileDeployments(ctx context.Context) {
 					Namespace:    d.Namespace,
 					Labels:       cloneLabels(d.Labels),
 					Status:       model.PodPending,
+					Image:        d.Image,
 					Command:      d.Command,
 					Args:         d.Args,
+					Resources:    d.Resources,
 					CreatedAt:    time.Now(),
 				}
 				if err := rc.store.CreatePod(ctx, pod); err != nil {

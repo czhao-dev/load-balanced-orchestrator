@@ -1,6 +1,6 @@
 # Architecture
 
-This module is a declarative infrastructure control plane. It implements the same architectural components found in production orchestration systems, simplified to run OS-subprocess workloads instead of OCI containers.
+This module is a declarative infrastructure control plane. It implements the same architectural components found in production orchestration systems. Pods execute as OS subprocesses by default; when a Deployment spec includes an `image:` field, the node agent instead uses the Docker SDK to pull the image and run it as a container.
 
 ## Component mapping
 
@@ -28,7 +28,7 @@ Control Plane API (:7070)      ← API Server
       v
 Node Agents (cmd/worker)       ← node agent (kubelet-style process)
       |  registers, heartbeats, polls /nodes/{id}/pods/poll
-      +--> subprocess execution (pods run as OS processes, not containers)
+      +--> subprocess execution (no image: field) or Docker container (image: set)
       |
       v
 Reverse Proxy (dynamic-discovery mode)
@@ -39,7 +39,7 @@ Reverse Proxy (dynamic-discovery mode)
 
 ## Control plane responsibilities
 
-- Receive `Deployment` specs (declarative desired state: command, replicas, retry policy, resources, namespace, labels).
+- Receive `Deployment` specs (declarative desired state: image or command, replicas, retry policy, resources, namespace, labels).
 - Register `Node`s and track liveness via heartbeats.
 - Schedule `Pod`s (one execution unit per Deployment replica) onto nodes with available capacity.
 - Reconcile actual pod/node state against desired state every tick: create missing pods (inheriting the Deployment's namespace and labels), cancel excess ones, detect heartbeat timeouts, reschedule orphaned pods, dead-letter pods that exhaust their retry budget.
@@ -52,7 +52,7 @@ Reverse Proxy (dynamic-discovery mode)
 
 - Registers with the control plane on startup (capacity, address) → gets a Node ID.
 - Heartbeats on a fixed interval.
-- Polls for pods assigned to it (`SCHEDULED` status), executes them as subprocesses, and reports status transitions back.
+- Polls for pods assigned to it (`SCHEDULED` status), executes them as OS subprocesses or Docker containers (determined by whether the pod carries an `image` field), and reports status transitions back.
 - Drains in-flight pods on shutdown rather than dropping them.
 
 ## Documented simplifications
@@ -64,7 +64,7 @@ These are intentional design decisions for the scope of this project, not bugs:
 | Distributed consensus store (e.g. etcd with Raft, gRPC) | BoltDB: embedded single-file ACID store, no network |
 | Watch/informer event streams from the state store | Node agent polls on a timer (500 ms); reconciler ticks on a timer (2 s) |
 | Services select Pods by label via overlay networking | Services select Nodes by label (Pods have no network address; nodes are the routable entities) |
-| Container runtime (OCI, containerd, runc) | `exec.CommandContext` — pods run as OS subprocesses |
+| Full container runtime (containerd, runc, CNI networking) | Docker SDK via `github.com/docker/docker/client` — pods run as Docker containers when `image:` is set, or OS subprocesses otherwise; no overlay networking or CNI |
 | RBAC, admission webhooks, CRDs, autoscaling | Not implemented |
 
 ## Why node agents are a separate process from the control plane

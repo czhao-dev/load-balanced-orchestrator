@@ -1,8 +1,8 @@
 // Package worker implements the node AGENT's client-side logic: register
 // with the control plane as a Node, heartbeat, poll for assigned Pods,
-// execute them as subprocesses, and report status back. This is distinct from
-// internal/model.Node, which is the control plane's server-side record of a
-// registered node.
+// execute them as subprocesses or Docker containers, and report status back.
+// This is distinct from internal/model.Node, which is the control plane's
+// server-side record of a registered node.
 package worker
 
 import (
@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	dockerclient "github.com/docker/docker/client"
 
 	"github.com/czhao-dev/control-plane/internal/agentmetrics"
 	"github.com/czhao-dev/control-plane/internal/model"
@@ -31,13 +33,17 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	PollInterval      time.Duration
 	ShutdownTimeout   time.Duration
+	// DockerHost is the Docker daemon socket (e.g. "unix:///var/run/docker.sock").
+	// Empty string falls back to the DOCKER_HOST env var or Docker's default socket.
+	DockerHost string
 }
 
 // Agent is a node agent process: it registers with the control plane,
-// heartbeats, polls for assigned pods, and executes them as subprocesses.
+// heartbeats, polls for assigned pods, and executes them.
 type Agent struct {
 	cfg    Config
 	client *http.Client
+	docker *dockerclient.Client
 	logger *slog.Logger
 
 	id  string
@@ -45,12 +51,33 @@ type Agent struct {
 	wg  sync.WaitGroup
 }
 
-func New(cfg Config, logger *slog.Logger) *Agent {
+// New creates an Agent. Returns an error only if the Docker client cannot be
+// constructed (e.g. malformed DockerHost URL). The Docker daemon does not need
+// to be running at construction time — connection errors surface at first use.
+func New(cfg Config, logger *slog.Logger) (*Agent, error) {
+	opts := []dockerclient.Opt{dockerclient.WithAPIVersionNegotiation()}
+	if cfg.DockerHost != "" {
+		opts = append(opts, dockerclient.WithHost(cfg.DockerHost))
+	} else {
+		opts = append(opts, dockerclient.FromEnv)
+	}
+	cli, err := dockerclient.NewClientWithOpts(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("docker client: %w", err)
+	}
 	return &Agent{
 		cfg:    cfg,
 		client: &http.Client{Timeout: 10 * time.Second},
+		docker: cli,
 		logger: logger,
 		sem:    make(chan struct{}, max(cfg.MaxConcurrentJobs, 1)),
+	}, nil
+}
+
+// Close releases resources held by the agent (primarily the Docker client).
+func (a *Agent) Close() {
+	if a.docker != nil {
+		a.docker.Close()
 	}
 }
 

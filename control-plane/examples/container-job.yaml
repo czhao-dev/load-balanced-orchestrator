@@ -1,0 +1,10 @@
+name: alpine-hello
+namespace: default
+image: alpine:3.20
+args: ["echo", "hello from a container"]
+replicas: 2
+max_retries: 1
+type: batch
+resources:
+  cpu: 0.25
+  memory_mb: 128

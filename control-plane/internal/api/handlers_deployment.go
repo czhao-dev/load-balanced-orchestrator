@@ -15,6 +15,7 @@ type submitDeploymentRequest struct {
 	Namespace     string                `json:"namespace"`
 	Labels        map[string]string     `json:"labels"`
 	Type          model.DeploymentType  `json:"type"`
+	Image         string                `json:"image,omitempty"`
 	Command       string                `json:"command"`
 	Args          []string              `json:"args"`
 	Replicas      int                   `json:"replicas"`
@@ -30,8 +31,8 @@ func (h *Handlers) CreateDeployment(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Name == "" || req.Command == "" {
-		writeJSONError(w, http.StatusBadRequest, "name and command are required")
+	if req.Name == "" || (req.Command == "" && req.Image == "") {
+		writeJSONError(w, http.StatusBadRequest, "name and either command or image are required")
 		return
 	}
 	if req.Replicas <= 0 {
@@ -62,6 +63,7 @@ func (h *Handlers) CreateDeployment(w http.ResponseWriter, r *http.Request) {
 			Namespace:     req.Namespace,
 			Labels:        req.Labels,
 			Type:          req.Type,
+			Image:         req.Image,
 			Command:       req.Command,
 			Args:          req.Args,
 			Replicas:      req.Replicas,

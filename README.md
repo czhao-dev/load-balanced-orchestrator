@@ -28,7 +28,7 @@ A declarative infrastructure control plane that accepts Deployment specs, schedu
 
 This control-plane/worker stack runs **alongside** — not instead of — the repo's original demo: a static reverse-proxy/load-balancer (`:8080`) fronting 3 standalone `ml-job-orchestrator` replicas. The two demonstrate different execution models within the same repo:
 
-- [`control-plane/`](control-plane/) — the control plane: declarative Deployments, Node registration/heartbeats, FIFO + resource-aware scheduling, desired-state reconciliation, failure detection and rescheduling, dead-lettering, label-based Service discovery, and a backend-discovery API the proxy can poll. CLI: `infractl`.
+- [`control-plane/`](control-plane/) — the control plane: declarative Deployments, Node registration/heartbeats, FIFO + resource-aware scheduling, desired-state reconciliation, failure detection and rescheduling, dead-lettering, label-based Service discovery, and a backend-discovery API the proxy can poll. Pods execute as OS subprocesses or Docker containers (set `image:` in the Deployment spec). CLI: `infractl`.
 - [`reverse-proxy-load-balancer/`](reverse-proxy-load-balancer/README.md) — reverse proxy / load balancer: round-robin/least-conn/weighted strategies, active health checking, retry/failover. Runs **twice** in this repo: once with a static backend list (`proxy`, `:8080`, fronting the orchestrators) and once with dynamic control-plane discovery (`dynamic-proxy`, `:8081`, fronting the node fleet).
 - [`ml-job-orchestrator/`](ml-job-orchestrator/README.md) — the original standalone REST API job scheduler (worker pool, subprocess executor, retry/backoff, in-memory state store). Still fully independent; see its own README.
 
@@ -110,7 +110,7 @@ Each subdirectory is a fully independent project with its own `go.mod`, `Dockerf
 ```bash
 cd ml-job-orchestrator && docker compose up --build           # orchestrator + prometheus + grafana alone
 cd reverse-proxy-load-balancer && docker compose up --build   # proxy + its own demo backends alone
-cd control-plane && go build ./... && go test ./...           # control plane builds/tests with zero Docker
+cd control-plane && go build ./... && go test ./...           # control plane builds/tests without a running Docker daemon
 ```
 
 `control-plane/` does not ship its own `docker-compose.yml` — its demo stack (workers, dynamic proxy, shared Prometheus/Grafana) is inherently multi-service and lives in the root [`docker-compose.yml`](docker-compose.yml) instead.
@@ -127,3 +127,4 @@ cd control-plane && go build ./... && go test ./...           # control plane bu
 - [go.etcd.io/bbolt](https://pkg.go.dev/go.etcd.io/bbolt) — embedded single-file ACID key-value store used as the persistent state backend in `control-plane/`
 - [gopkg.in/yaml.v3](https://pkg.go.dev/gopkg.in/yaml.v3) — YAML parsing used for declarative deployment spec files
 - [testify](https://github.com/stretchr/testify) — assertion and mock library used across all three modules
+- [Docker Go SDK](https://pkg.go.dev/github.com/docker/docker/client) — official Docker client used by the node agent to pull images and manage container lifecycle when `image:` is set in a Deployment spec
